@@ -55,6 +55,7 @@ pipeline {
                 echo '🔍 Analyse SonarQube...'
                 withCredentials([string(credentialsId: 'maberger38-sonar-token', variable: 'SONAR_TOKEN')]) {
                     sh '''
+                        npm install -g sonarqube-scanner
                         sonar-scanner \
                             -Dsonar.host.url=${SONAR_HOST_URL} \
                             -Dsonar.token=${SONAR_TOKEN} \
