@@ -9,12 +9,9 @@ pipeline {
 
     environment {
         DOCKER_REGISTRY = 'docker.io'
-        DOCKER_USERNAME = credentials('maberger38-dockerhub-password')
-        DOCKER_PASSWORD = credentials('maberger38-dockerhub-password')
-        DOCKER_IMAGE = "${DOCKER_REGISTRY}/${DOCKER_USERNAME}/tasklist-frontend"
+        DOCKER_IMAGE_NAME = 'maberger38/tasklist-frontend'
         SONAR_HOST_URL = 'https://sonarqube.cicd.kits.ext.educentre.fr'
-        SONAR_TOKEN = credentials('maberger38-sonar-token')
-        BUILD_TAG = "${BUILD_NUMBER}"
+        SONAR_PROJECT_KEY = 'martin-tasklist-frontend'
     }
 
     stages {
@@ -40,12 +37,8 @@ pipeline {
             post {
                 always {
                     echo '📊 Publication des rapports de tests...'
-                    junit 'reports/junit.xml'
-                    publishHTML([
-                        reportDir: 'coverage',
-                        reportFiles: 'index.html',
-                        reportName: 'Coverage Report'
-                    ])
+                    junit allowEmptyResults: true, testResults: 'reports/junit.xml'
+                    archiveArtifacts artifacts: 'coverage/**', allowEmptyArchive: true
                 }
             }
         }
@@ -60,42 +53,46 @@ pipeline {
         stage('Analyse SonarQube') {
             steps {
                 echo '🔍 Analyse SonarQube...'
-                sh '''
-                    sonar-scanner \
-                        -Dsonar.host.url=${SONAR_HOST_URL} \
-                        -Dsonar.token=${SONAR_TOKEN} \
-                        -Dsonar.projectKey=martin-tasklist-frontend \
-                        -Dsonar.projectName="TaskList Frontend - Build ${BUILD_TAG}" \
-                        -Dsonar.sources=src \
-                        -Dsonar.exclusions="src/__tests__/**" \
-                        -Dsonar.javascript.lcov.reportPaths=coverage/lcov.info \
-                        -Dsonar.testExecutionReportPaths=""
-                '''
+                withCredentials([string(credentialsId: 'maberger38-sonar-token', variable: 'SONAR_TOKEN')]) {
+                    sh '''
+                        sonar-scanner \
+                            -Dsonar.host.url=${SONAR_HOST_URL} \
+                            -Dsonar.token=${SONAR_TOKEN} \
+                            -Dsonar.projectKey=${SONAR_PROJECT_KEY} \
+                            -Dsonar.projectName="TaskList Frontend - Build ${BUILD_NUMBER}" \
+                            -Dsonar.sources=src \
+                            -Dsonar.exclusions="src/__tests__/**" \
+                            -Dsonar.javascript.lcov.reportPaths=coverage/lcov.info \
+                            -Dsonar.testExecutionReportPaths=""
+                    '''
+                }
             }
         }
 
         stage('Vérification Quality Gate SonarQube') {
             steps {
                 echo '✅ Vérification de la Quality Gate...'
-                sh '''
-                    # Attendre que SonarQube traite le rapport (optionnel)
-                    sleep 5
+                withCredentials([string(credentialsId: 'maberger38-sonar-token', variable: 'SONAR_TOKEN')]) {
+                    sh '''
+                        # Attendre que SonarQube traite le rapport
+                        sleep 5
 
-                    # Vérifier la quality gate via l'API SonarQube
-                    QUALITY_GATE_STATUS=$(curl -s \
-                        -u "${SONAR_TOKEN}:" \
-                        "${SONAR_HOST_URL}/api/qualitygates/project_status?projectKey=martin-tasklist-frontend" \
-                        | grep -o '"status":"[^"]*' | cut -d'"' -f4)
+                        # Vérifier la quality gate via l'API SonarQube
+                        QUALITY_GATE_STATUS=$(curl -s \
+                            -u "${SONAR_TOKEN}:" \
+                            "${SONAR_HOST_URL}/api/qualitygates/project_status?projectKey=${SONAR_PROJECT_KEY}" \
+                            | grep -o '"status":"[^"]*' | cut -d'"' -f4)
 
-                    echo "Quality Gate Status: ${QUALITY_GATE_STATUS}"
+                        echo "Quality Gate Status: ${QUALITY_GATE_STATUS}"
 
-                    if [ "${QUALITY_GATE_STATUS}" != "OK" ]; then
-                        echo "❌ Quality Gate FAILED"
-                        exit 1
-                    fi
+                        if [ "${QUALITY_GATE_STATUS}" != "OK" ]; then
+                            echo "❌ Quality Gate FAILED"
+                            exit 1
+                        fi
 
-                    echo "✅ Quality Gate PASSED"
-                '''
+                        echo "✅ Quality Gate PASSED"
+                    '''
+                }
             }
         }
 
@@ -104,8 +101,8 @@ pipeline {
                 echo '🐳 Construction de l\'image Docker...'
                 sh '''
                     docker buildx build \
-                        --tag ${DOCKER_IMAGE}:${BUILD_TAG} \
-                        --tag ${DOCKER_IMAGE}:latest \
+                        --tag ${DOCKER_IMAGE_NAME}:${BUILD_NUMBER} \
+                        --tag ${DOCKER_IMAGE_NAME}:latest \
                         --load \
                         .
                 '''
@@ -121,16 +118,16 @@ pipeline {
                         --severity CRITICAL,HIGH \
                         --format json \
                         --output trivy-report.json \
-                        ${DOCKER_IMAGE}:${BUILD_TAG}
+                        ${DOCKER_IMAGE_NAME}:${BUILD_NUMBER}
 
                     # Affichage du rapport
                     trivy image \
                         --severity CRITICAL,HIGH \
                         --format table \
-                        ${DOCKER_IMAGE}:${BUILD_TAG}
+                        ${DOCKER_IMAGE_NAME}:${BUILD_NUMBER}
 
                     # Vérifier s'il y a des vulnérabilités CRITICAL ou HIGH
-                    VULN_COUNT=$(cat trivy-report.json | grep -o '"Severity":"HIGH\\|CRITICAL' | wc -l)
+                    VULN_COUNT=$(grep -o '"Severity":"\\(HIGH\\|CRITICAL\\)' trivy-report.json 2>/dev/null | wc -l || echo 0)
 
                     if [ ${VULN_COUNT} -gt 0 ]; then
                         echo "❌ ${VULN_COUNT} vulnérabilités CRITICAL/HIGH détectées"
@@ -156,13 +153,13 @@ pipeline {
                     trivy image \
                         --format spdx-json \
                         --output sbom-spdx.json \
-                        ${DOCKER_IMAGE}:${BUILD_TAG}
+                        ${DOCKER_IMAGE_NAME}:${BUILD_NUMBER}
 
                     # SBOM CycloneDX
                     trivy image \
                         --format cyclonedx \
                         --output sbom-cyclonedx.json \
-                        ${DOCKER_IMAGE}:${BUILD_TAG}
+                        ${DOCKER_IMAGE_NAME}:${BUILD_NUMBER}
 
                     echo "✅ SBOM générés"
                 '''
@@ -178,16 +175,18 @@ pipeline {
         stage('Publication sur Docker Hub') {
             steps {
                 echo '🚀 Publication de l\'image Docker...'
-                sh '''
-                    echo "${DOCKER_PASSWORD}" | docker login -u "${DOCKER_USERNAME}" --password-stdin
+                withCredentials([usernamePassword(credentialsId: 'maberger38-dockerhub-password', usernameVariable: 'DOCKER_USER', passwordVariable: 'DOCKER_PASS')]) {
+                    sh '''
+                        echo "${DOCKER_PASS}" | docker login -u "${DOCKER_USER}" --password-stdin
 
-                    docker push ${DOCKER_IMAGE}:${BUILD_TAG}
-                    docker push ${DOCKER_IMAGE}:latest
+                        docker push ${DOCKER_IMAGE_NAME}:${BUILD_NUMBER}
+                        docker push ${DOCKER_IMAGE_NAME}:latest
 
-                    docker logout
+                        docker logout
 
-                    echo "✅ Image pushée sur Docker Hub"
-                '''
+                        echo "✅ Image pushée sur Docker Hub"
+                    '''
+                }
             }
         }
 
@@ -206,7 +205,7 @@ pipeline {
                 echo "==================================="
                 echo "Pipeline Build #${BUILD_NUMBER} terminée"
                 echo "==================================="
-                echo "Docker Image: ${DOCKER_IMAGE}:${BUILD_TAG}"
+                echo "Docker Image: ${DOCKER_IMAGE_NAME}:${BUILD_NUMBER}"
                 echo "==================================="
             '''
         }
