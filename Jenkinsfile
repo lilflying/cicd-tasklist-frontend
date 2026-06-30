@@ -82,7 +82,7 @@ pipeline {
                         QUALITY_GATE_STATUS=$(curl -s \
                             -u "${SONAR_TOKEN}:" \
                             "${SONAR_HOST_URL}/api/qualitygates/project_status?projectKey=${SONAR_PROJECT_KEY}" \
-                            | grep -o '"status":"[^"]*' | cut -d'"' -f4)
+                            | grep -o '"status":"[^"]*' | head -1 | cut -d'"' -f4)
 
                         echo "Quality Gate Status: ${QUALITY_GATE_STATUS}"
 
